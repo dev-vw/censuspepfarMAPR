@@ -1,6 +1,7 @@
 # app.R
 library(shiny)
 library(leaflet)
+library(leaflet.providers)
 library(sf)
 
 ui <- fluidPage(
@@ -57,6 +58,7 @@ ui <- fluidPage(
     mainPanel(
       fluidRow(
         column(6,
+               h4("PEPFAR"),
                leafletOutput("pmap", height = "600px"),
                conditionalPanel(
                  condition = "input.show_facilities == true && input.ppolygon_select != ''",
@@ -69,6 +71,7 @@ ui <- fluidPage(
                )
         ),
         column(6,
+               h4("Census"),
                leafletOutput("cmap", height = "600px"),
                conditionalPanel(
                  condition = "input.show_facilities == true && input.cpolygon_select != ''",
@@ -101,6 +104,7 @@ server <- function(input, output, session) {
 
 # reactive objects --------------------------------------------------------
 
+  # overall adm0 boundary
   pshp <- reactive({
     req(input$pepfar_country, input$padm_level)
 
@@ -112,6 +116,7 @@ server <- function(input, output, session) {
     census_shp_lst[[input$census_country]][[input$cadm_level]]
   })
 
+  # selected subnational boundary
   ppoly <- reactive({
     req(pshp(), input$ppolygon_select)
     pshp()[pshp()[["name"]] == input$ppolygon_select, ]
@@ -122,6 +127,7 @@ server <- function(input, output, session) {
     cshp()[cshp()[["AREA_NAME"]] == input$cpolygon_select, ]
   })
 
+  # status variable that assesses if subnational boundary is active
   ppoly_active <- reactive({
     !is.null(input$ppolygon_select) && !is.null(ppoly())
   })
@@ -130,8 +136,9 @@ server <- function(input, output, session) {
     !is.null(input$cpolygon_select) && !is.null(cpoly())
   })
 
+  # dynamic polygon width changes
   pmax_buffer_width <- reactive({
-    req(ppoly())
+    req(input$show_facilities, ppoly())
 
     # since sf_use_s2 is set to FALSE, being specific about projections is especially important
     ppoly_proj <- st_transform(ppoly(), crs = 3857)
@@ -141,13 +148,52 @@ server <- function(input, output, session) {
   })
 
   cmax_buffer_width <- reactive({
-    req(cpoly())
+    req(input$show_facilities, cpoly())
 
     # since sf_use_s2 is set to FALSE, being specific about projections is especially important
     cpoly_proj <- st_transform(cpoly(), crs = 3857)
 
     bbox <- st_bbox(cpoly_proj)
     min(bbox["xmax"] - bbox["xmin"], bbox["ymax"] - bbox["ymin"]) / 2
+  })
+
+  # dynamic pt layers
+  ppts <- reactive({
+    req(input$show_facilities, ppoly(), ppoly_active())
+    st_filter(facilities, ppoly())
+  })
+
+  cpts <- reactive({
+    req(input$show_facilities, cpoly(), cpoly_active())
+    st_filter(facilities, cpoly())
+  })
+
+  pbuffer <- reactive({
+    req(input$show_facilities, ppoly(), ppoly_active())
+
+    st_difference(
+      ppoly(),
+      st_buffer(ppoly(), dist = -input$pbuffer_dist / 111.32))
+  })
+
+  cbuffer <- reactive({
+    req(input$show_facilities, cpoly(), cpoly_active())
+
+    st_difference(
+      cpoly(),
+      st_buffer(cpoly(), dist = -input$cbuffer_dist / 111.32))
+  })
+
+  ppts_buffer <- reactive({
+    req(pbuffer(), ppts())
+
+    st_intersection(pbuffer(), ppts())
+  })
+
+  cpts_buffer <- reactive({
+    req(cbuffer(), cpts())
+
+    st_intersection(cbuffer(), cpts())
   })
 
 # reactive UIs ------------------------------------------------------------
@@ -190,7 +236,7 @@ server <- function(input, output, session) {
 
   # dynamically update the slider input according to the subnat polygon displayed
   observe({
-    req(ppoly())
+    req(input$show_facilities, ppoly_active(), ppoly())
     max_dist <- round(pmax_buffer_width() / 1000) # convert to km
     updateSliderInput(session,
                       inputId = "pbuffer_dist",
@@ -199,7 +245,7 @@ server <- function(input, output, session) {
   })
 
   observe({
-    req(cpoly())
+    req(input$show_facilities, cpoly_active(), cpoly())
     max_dist <- round(cmax_buffer_width() / 1000) # convert to km
     updateSliderInput(session,
                       inputId = "cbuffer_dist",
@@ -214,7 +260,8 @@ server <- function(input, output, session) {
     req(pshp())
 
     leaflet(pshp()) %>%
-      addTiles() %>%
+      addProviderTiles(providers$CartoDB.Positron) %>%
+      #addTiles() %>%
       addPolygons(
         fillColor = "darkred", fillOpacity = 1,
         weight = 1, color = "black",
@@ -226,7 +273,8 @@ server <- function(input, output, session) {
     req(cshp())
 
     leaflet(cshp()) %>%
-      addTiles() %>%
+      addProviderTiles(providers$CartoDB.Positron) %>%
+      #addTiles() %>%
       addPolygons(
         fillColor = "steelblue", fillOpacity = 1,
         weight = 1, color = "black",
@@ -275,21 +323,13 @@ server <- function(input, output, session) {
 
   # switching facilities on and off
   observe({
-    #browser()
     if (input$show_facilities && ppoly_active()) {
       print("pepfar points")
-      ppts <- st_filter(facilities, ppoly())
-      pbuffer <- st_difference(
-        ppoly(),
-        st_buffer(ppoly(), dist = -input$pbuffer_dist / 111.32))
-      ppts_buffer <- st_intersection(
-        pbuffer, ppts
-      )
 
       leafletProxy("pmap") %>%
         clearGroup("ppoints") %>%
         addCircleMarkers(
-          data = ppts,
+          data = ppts(),
           radius = 1,
           color = "#ffe6e6",
           opacity = 1,
@@ -298,13 +338,13 @@ server <- function(input, output, session) {
           group = "ppoints"
         ) %>%
         addPolygons(
-          data = pbuffer,
+          data = pbuffer(),
           fillOpacity = 0.2,
           color = "black", weight = 2,
           group = "ppoints",
         ) %>%
         addCircleMarkers(
-          data = ppts_buffer,
+          data = ppts_buffer(),
           radius = 1,
           color = "#D1D100",
           opacity = 1,
@@ -320,18 +360,13 @@ server <- function(input, output, session) {
   observe({
     if (input$show_facilities && cpoly_active()) {
       print("census points")
-      cpts <- st_filter(facilities, cpoly())
-      cbuffer <- st_difference(
-        cpoly(),
-        st_buffer(cpoly(), dist = -input$cbuffer_dist / 111.32))
-      cpts_buffer <- st_intersection(
-        cbuffer, cpts
-      )
+
+      # browser()
 
       leafletProxy("cmap") %>%
         clearGroup("cpoints") %>%
         addCircleMarkers(
-          data = cpts,
+          data = cpts(),
           radius = 1,
           color = "#edf3f8",
           opacity = 1,
@@ -340,13 +375,13 @@ server <- function(input, output, session) {
           group = "cpoints"
         ) %>%
         addPolygons(
-          data = cbuffer,
+          data = cbuffer(),
           fillOpacity = 0.2,
           color = "black", weight = 2,
           group = "cpoints",
         ) %>%
         addCircleMarkers(
-          data = cpts_buffer,
+          data = cpts_buffer(),
           radius = 1,
           color = "#D129B2",
           opacity = 1,
@@ -362,43 +397,23 @@ server <- function(input, output, session) {
 # info box ----------------------------------------------------------------
 
   output$pinfo <- renderText({
-    req(input$show_facilities, ppoly_active())
+    req(input$show_facilities, ppoly_active(), ppts())
 
-    ppts <- st_filter(facilities, ppoly())
-
-    total <- nrow(ppts)
-
-    pbuffer <- st_difference(
-      ppoly(),
-      st_buffer(ppoly(), dist = -input$pbuffer_dist / 111.32))
-    ppts_buffer <- st_intersection(
-      pbuffer, ppts
-    )
-
-    within <- nrow(ppts_buffer)
+    total <- nrow(ppts())
+    within <- nrow(ppts_buffer())
     percent <- if (total > 0) round((within/total) * 100, 1) else 0
 
-    paste0("Facilities within ", input$pbuffer_dist, "km buffer: ", within, " / ", total, " (", percent, "%)")
+    paste0("Facilities within ", input$pbuffer_dist, "km of the border: ", within, " / ", total, " (", percent, "%)")
   })
 
   output$cinfo <- renderText({
-    req(input$show_facilities, cpoly_active())
+    req(input$show_facilities, cpoly_active(), cpts())
 
-    cpts <- st_filter(facilities, cpoly())
+    total <- nrow(cpts())
+    within <- nrow(cpts_buffer())
+    percent <- if (total > 0) round((within / total) * 100, 1) else 0
 
-    total <- nrow(cpts)
-
-    cbuffer <- st_difference(
-      cpoly(),
-      st_buffer(cpoly(), dist = -input$cbuffer_dist / 111.32))
-    cpts_buffer <- st_intersection(
-      cbuffer, cpts
-    )
-
-    within <- nrow(cpts_buffer)
-    percent <- if (total > 0) round((within/total) * 100, 1) else 0
-
-    paste0("Facilities within ", input$cbuffer_dist, "km buffer: ", within, " / ", total, " (", percent, "%)")
+    paste0("Facilities within ", input$cbuffer_dist, "km of the border: ", within, " / ", total, " (", percent, "%)")
   })
 }
 
